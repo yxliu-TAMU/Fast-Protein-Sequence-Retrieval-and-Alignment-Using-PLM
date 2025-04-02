@@ -9,3 +9,6 @@ Environment:
 5. biotite
 6. tqdm
 7. transformers
+
+Align using Toy example dataset:
+python align.py   --data_file database/toy_dataset/   --output_file msa_alignments.txt   --model_name_or_path facebook/esm2_t6_8M_UR50D   --align_layer 6   --extraction softmax   --batch_size 1   --num_workers 1
