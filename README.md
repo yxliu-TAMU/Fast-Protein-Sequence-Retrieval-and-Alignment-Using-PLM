@@ -13,4 +13,4 @@ Environment:
 Align using Toy example dataset:
 python align.py   --data_file database/toy_dataset/   --output_file msa_alignments.txt   --model_name_or_path facebook/esm2_t6_8M_UR50D   --align_layer 6   --extraction softmax   --batch_size 1   --num_workers 1
 
-Whole training set is large so saved in our shared drive: https://drive.google.com/drive/folders/0AEfJCcsXjvCIUk9PVA
+Whole training set is large so saved in our shared drive: https://drive.google.com/drive/folders/0AEfJCcsXjvCIUk9PVA. Save it to database/large_dataset/
