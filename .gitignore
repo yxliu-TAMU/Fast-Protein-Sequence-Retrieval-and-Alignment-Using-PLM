@@ -1,2 +1,4 @@
 # Ignore the large training dataset file
 database/large_dataset/train.txt
+*.tar.gz
+ncbi*/

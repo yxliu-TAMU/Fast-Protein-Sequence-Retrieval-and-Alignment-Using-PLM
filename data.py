@@ -1,56 +1,20 @@
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from typing import List, Tuple
 import pdb
 
 class ProteinAlignmentDataset(Dataset):
-    def __init__(self, data_dir: str, vocab: str):
+    def __init__(self, data_dir: str, vocab: str, single_file: bool = False):
         self.vocab = vocab
         self.token2idx = {aa: i for i, aa in enumerate(vocab)}
         self.idx2token = {i: aa for aa, i in self.token2idx.items()}
         self.pad_idx = self.token2idx['<PAD>']
         self.bos_idx = self.token2idx['<BOS>']
-        self.data = self._load_data(data_dir)
-    """
-    def _load_data(self, folder: str) -> List[Tuple[List[int], List[int], List[float], List[int], str, str]]:
-        data = []
-        for fname in os.listdir(folder):
-            if not fname.endswith(".txt"):
-                continue
-            with open(os.path.join(folder, fname), "r") as f:
-                lines = f.readlines()
-                #pdb.set_trace()
-                ref_raw = lines[0].strip().split("Reference:")[-1].strip()
-                ali_raw = lines[1].strip().split("Aligned:")[-1].strip()
-                ref = ref_raw.replace('-', '')
-                hyp = ali_raw.replace('-', '')
-
-                #hyp = '<BOS>' + hyp
-                insert_counts = [0] * (len(hyp)+1)
-                delete_labels = [1]  # BOS token is always marked as deleted
-
-                ref_ptr = 0
-                ali_ptr = 0
-
-                while ali_ptr < len(ali_raw):
-                    if ali_raw[ali_ptr] == '-':
-                        insert_counts[len(delete_labels) - 1] += 1
-                        ali_ptr += 1
-                    else:
-                        if ref_raw[ali_ptr] == '-':
-                            delete_labels.append(1)
-                        else:
-                            delete_labels.append(0)
-                            ref_ptr += 1
-                        ali_ptr += 1
-
-                ref_ids = [self.token2idx.get(c, self.token2idx['<UNK>']) for c in ref]
-                hyp_ids = [self.bos_idx] + [self.token2idx.get(c, self.token2idx['<UNK>']) for c in hyp]
-                #pdb.set_trace()
-                data.append((ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw))
-        return data
-    """
+        if single_file:
+            self.data = self._load_data_txt(data_dir)
+        else:
+            self.data = self._load_data(data_dir)
 
     def _load_data(self, folder: str) -> List[Tuple[List[int], List[int], List[float], List[int], str, str]]:
         data = []
@@ -93,12 +57,67 @@ class ProteinAlignmentDataset(Dataset):
                 data.append((ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw))
         return data
 
+    def _load_data_txt(self, file_path: str) -> List[Tuple[List[int], List[int], List[float], List[int], str, str]]:
+        data = []
+        with open(file_path, "r") as f:
+            lines = f.readlines()
+            for i in range(0, len(lines), 2):
+                ref_raw = lines[i].strip().split("Reference:")[-1].strip()
+                ali_raw = lines[i + 1].strip().split("Aligned:")[-1].strip()
+                ref = ref_raw.replace('-', '')
+                hyp = ali_raw.replace('-', '')
+
+                ref_ids = [self.token2idx.get(c, self.token2idx['<UNK>']) for c in ref]
+                hyp_ids = [self.token2idx.get(c, self.token2idx['<UNK>']) for c in hyp]
+
+                # Filter sequences containing '<UNK>'
+                if self.token2idx['<UNK>'] in ref_ids or self.token2idx['<UNK>'] in hyp_ids:
+                    continue
+
+                insert_counts = [0] * (len(hyp) + 1)
+                delete_labels = [1]  # BOS token is always marked as deleted
+
+                ref_ptr = 0
+                ali_ptr = 0
+
+                while ali_ptr < len(ali_raw):
+                    if ali_raw[ali_ptr] == '-':
+                        insert_counts[len(delete_labels) - 1] += 1
+                        ali_ptr += 1
+                    else:
+                        if ref_raw[ali_ptr] == '-':
+                            delete_labels.append(1)
+                        else:
+                            delete_labels.append(0)
+                            ref_ptr += 1
+                        ali_ptr += 1
+
+                hyp_ids = [self.bos_idx] + hyp_ids
+                data.append((ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw))
+        return data
+
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw = self.data[idx]
         return torch.tensor(ref_ids), torch.tensor(hyp_ids), torch.tensor(insert_counts), torch.tensor(delete_labels), ref_raw, ali_raw
+
+
+
+def collate_fn(batch):
+    ref_seqs, hyp_seqs, insert_targets, delete_targets, ref_raws, ali_raws = zip(*batch)
+
+    ref_pad = torch.nn.utils.rnn.pad_sequence(ref_seqs, padding_value=0)
+    hyp_pad = torch.nn.utils.rnn.pad_sequence(hyp_seqs, padding_value=0)
+    insert_pad = torch.nn.utils.rnn.pad_sequence(insert_targets, padding_value=0)
+    delete_pad = torch.nn.utils.rnn.pad_sequence(delete_targets, padding_value=0)
+
+    ref_mask = (ref_pad == 0).transpose(0, 1)
+    hyp_mask = (hyp_pad == 0).transpose(0, 1)
+
+    return ref_pad, hyp_pad, insert_pad, delete_pad, ref_mask, hyp_mask, ref_raws, ali_raws
 
 def collate_fn(batch):
     ref_seqs, hyp_seqs, insert_targets, delete_targets, ref_raws, ali_raws = zip(*batch)
@@ -114,11 +133,22 @@ def collate_fn(batch):
     return ref_pad, hyp_pad, insert_pad, delete_pad, ref_mask, hyp_mask, ref_raws, ali_raws
 
 
-def get_dataloader(data_dir: str, batch_size: int = 16):
+def get_dataloaders(data_dir: str, batch_size: int = 16, single_file: bool = False, seed: int = 42, train: bool = True):
     vocab = list("ACDEFGHIKLMNPQRSTVWY") + ['<PAD>', '<UNK>', '<BOS>']
-    dataset = ProteinAlignmentDataset(data_dir, vocab)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    return loader, vocab
+    dataset = ProteinAlignmentDataset(data_dir, vocab, single_file=single_file)
+
+    if train:
+        val_size = int(0.1 * len(dataset))
+        train_size = len(dataset) - val_size
+        generator = torch.Generator().manual_seed(seed)
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+        return train_loader, val_loader, vocab
+    else:
+        full_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+        return full_loader, vocab
 
 """
 def reconstruct_alignment(ref: str, hyp: str, insert_counts: List[int], delete_labels: List[int]) -> Tuple[str, str]:
@@ -196,20 +226,37 @@ def reconstruct_alignment(ref: str, hyp: str, insert_counts: List[int], delete_l
 
 
 if __name__ == "__main__":
-    loader, vocab = get_dataloader("database/toy_dataset", batch_size=1)
-    for ref_ids, hyp_ids, insert_counts, delete_labels, _, _, ref_raws, ali_raws in loader:
-        ref_seq = ''.join([vocab[i] for i in ref_ids[:, 0].tolist()])
-        hyp_seq = ''.join([vocab[i] for i in hyp_ids[:, 0].tolist()])[5:]  # Exclude "<BOS>"
+    train_loader, val_loader, vocab = get_dataloaders("database/toy_dataset/", batch_size=4, single_file=False)
 
-        insert_counts = insert_counts[:, 0].tolist()
-        delete_labels = delete_labels[:, 0].tolist()
-        # length of the inputs not matching, and pdb.set_trace()
-        if len(insert_counts) != len(hyp_seq) + 1 or len(delete_labels) != len(hyp_seq)+1:
-            print(f"Length mismatch: {len(ref_seq)} != {len(ref_raws[0])} or {len(hyp_seq)} != {len(ali_raws[0])}")
-            pdb.set_trace()
-        recon_ref, recon_ali = reconstruct_alignment(ref_seq, hyp_seq, insert_counts, delete_labels)
-        assert recon_ali == ali_raws[0], f"Mismatch in Aligned: {recon_ali} != {ali_raws[0]}"
-        assert recon_ref == ref_raws[0], f"Mismatch in Reference: {recon_ref} != {ref_raws[0]}"
+    # Test reconstruction on the validation set
+    val_dataset = val_loader.dataset  # Subset object
+    print(f"Validation set size (folder): {len(val_dataset)}")
 
-        print("Reconstructed alignment matches original for one example.")
-    print(len(loader.dataset))
+    # Loop over first 5 examples for reconstruction
+    for idx in range(min(5, len(val_dataset))):
+        ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw = val_dataset[idx]
+        ref_seq = ''.join([vocab[i] for i in ref_ids.tolist()])
+        hyp_seq = ''.join([vocab[i] for i in hyp_ids.tolist()])[5:]
+        
+        recon_ref, recon_ali = reconstruct_alignment(ref_seq, hyp_seq, insert_counts.tolist(), delete_labels.tolist())
+        assert recon_ref == ref_raw, f"Reconstructed reference does not match original: {recon_ref} != {ref_raw}"
+        assert recon_ali == ali_raw, f"Reconstructed aligned does not match original: {recon_ali} != {ali_raw}"
+
+    # ------------------------------
+    # Example 2: Single File Dataset with Random Sampling
+    # ------------------------------
+    print("\n=== Single File Dataset Random Sampling Reconstruction ===")
+    single_dataset = ProteinAlignmentDataset("database/large_dataset/train.txt", vocab, single_file=True)
+    print(f"Total samples in single file dataset: {len(single_dataset)}")
+
+    # Randomly select 100 examples
+    sample_indices = torch.randperm(len(single_dataset))[:100]
+
+    for count, idx in enumerate(sample_indices.tolist()):
+        ref_ids, hyp_ids, insert_counts, delete_labels, ref_raw, ali_raw = single_dataset[idx]
+        ref_seq = ''.join([vocab[i] for i in ref_ids.tolist()])
+        hyp_seq = ''.join([vocab[i] for i in hyp_ids.tolist()])[5:]
+        
+        recon_ref, recon_ali = reconstruct_alignment(ref_seq, hyp_seq, insert_counts.tolist(), delete_labels.tolist())
+        assert recon_ref == ref_raw, f"Reconstructed reference does not match original: {recon_ref} != {ref_raw}"
+        assert recon_ali == ali_raw, f"Reconstructed aligned does not match original: {recon_ali} != {ali_raw}"
