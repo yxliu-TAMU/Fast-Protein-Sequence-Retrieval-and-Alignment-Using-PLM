@@ -2,3 +2,5 @@
 database/large_dataset/train.txt
 *.tar.gz
 ncbi*/
+.venv/
+sequence_embeddings.json
